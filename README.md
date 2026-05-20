@@ -350,6 +350,27 @@ For interactive authentication via device code:
 
 Tokens are cached securely in your OS credential store (fallback to file).
 
+##### External broker bridge (`--broker-cmd`)
+
+For deployments where MSAL can't acquire a usable token directly — most notably **WSL2 on a managed Windows host with Azure AD Conditional Access** — delegate token acquisition to an external command. The MCP server spawns the command, parses an access token from its stdout, and uses it for Graph calls.
+
+The recommended pairing on WSL2 is Microsoft's [`azureauth.exe`](https://github.com/AzureAD/microsoft-authentication-cli), installed once on the Windows host (`winget install AzureAuth`). WSL2 interop launches the `.exe` on the Windows side where WAM can use the device's Primary Refresh Token, so the resulting token carries the device-compliance claim Conditional Access requires.
+
+```bash
+ms-365-mcp-server \
+  --broker-cmd 'azureauth.exe aad --client {clientId} --tenant {tenantId} --resource {resource} --mode broker --output json' \
+  --login
+```
+
+The command runs through the shell. `{clientId}`, `{tenantId}`, `{scopes}`, and `{resource}` are substituted into the template and also exported as `MS365_MCP_BROKER_*` environment variables. Accepted stdout JSON shapes — azureauth's native output works as-is:
+
+```json
+{ "access_token": "eyJ...", "expires_on": 1747743000 }
+{ "token":        "eyJ...", "expirationTimestamp": 1747743000 }
+```
+
+When `--broker-cmd` is set it takes precedence over the device-code / interactive flows. It works on any platform — anywhere you have an external token source that emits JSON on stdout. You can also configure it via `MS365_MCP_BROKER_CMD`.
+
 #### 2. OAuth Authorization Code Flow (HTTP mode only)
 
 When running with `--http`, the server **requires** OAuth authentication:

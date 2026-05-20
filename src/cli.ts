@@ -75,6 +75,10 @@ program
     'Use browser-based interactive OAuth flow instead of device code for stdio mode. Opens system browser with localhost callback for seamless sign-in.'
   )
   .option(
+    '--broker-cmd <command>',
+    'Acquire tokens by shelling out to an external broker command instead of MSAL. The command is invoked via the shell; the placeholders {clientId}, {tenantId}, {scopes}, {resource} are substituted and also exported as MS365_MCP_BROKER_* env vars. The command must print JSON on stdout containing either "access_token" (with optional "expires_on") or azureauth\'s "token" + "expirationTimestamp" keys. Designed for the WSL2 → Windows-WAM bridge via azureauth.exe.'
+  )
+  .option(
     '--public-url <url>',
     'Public base URL (e.g. https://mcp.example.com) used in browser-facing OAuth redirects when running behind a reverse proxy. Server-to-server endpoints (token, register) stay on the request host.'
   )
@@ -116,6 +120,7 @@ export interface CommandOptions {
   enableDynamicRegistration?: boolean;
   dynamicRegistration?: boolean;
   authBrowser?: boolean;
+  brokerCmd?: string;
   obo?: boolean;
   publicUrl?: string;
   /** @deprecated use publicUrl */
@@ -254,6 +259,22 @@ export function parseArgs(): CommandOptions {
 
   if (process.env.MS365_MCP_OBO === 'true' || process.env.MS365_MCP_OBO === '1') {
     options.obo = true;
+  }
+
+  if (options.brokerCmd === undefined && process.env.MS365_MCP_BROKER_CMD !== undefined) {
+    options.brokerCmd = process.env.MS365_MCP_BROKER_CMD;
+  }
+
+  if (options.brokerCmd !== undefined) {
+    const trimmed = String(options.brokerCmd).trim();
+    if (trimmed === '') {
+      console.error(
+        'Error: --broker-cmd / MS365_MCP_BROKER_CMD was provided but is empty. ' +
+          'Provide a command line to invoke, or omit it to use the default flow.'
+      );
+      process.exit(1);
+    }
+    options.brokerCmd = trimmed;
   }
 
   // Handle cloud type - CLI option takes precedence over environment variable

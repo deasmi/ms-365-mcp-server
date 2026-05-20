@@ -16,6 +16,7 @@ import {
   unwrapCache,
   wrapCache,
 } from './token-cache-storage.js';
+import { acquireTokenFromExternalBroker } from './external-broker.js';
 
 interface EndpointConfig {
   pathPattern: string;
@@ -367,6 +368,7 @@ interface ExpectedAccountOptions {
 
 interface AuthManagerCreateOptions {
   storage?: TokenCacheStorage;
+  brokerCmd?: string | null;
 }
 
 class AuthManager {
@@ -379,6 +381,7 @@ class AuthManager {
   private isOAuthMode: boolean;
   private selectedAccountId: string | null;
   private useInteractiveAuth: boolean;
+  private brokerCmd: string | null;
   private expectedUsername: string | null;
   private expectedHomeAccountId: string | null;
   private storage: TokenCacheStorage;
@@ -387,7 +390,8 @@ class AuthManager {
     config: Configuration,
     scopes: string[] = [],
     expectedAccount?: ExpectedAccountOptions,
-    storage?: TokenCacheStorage
+    storage?: TokenCacheStorage,
+    brokerCmd: string | null = null
   ) {
     logger.info(`And scopes are ${scopes.join(', ')}`, scopes);
     this.config = config;
@@ -397,6 +401,7 @@ class AuthManager {
     this.tokenExpiry = null;
     this.selectedAccountId = null;
     this.useInteractiveAuth = false;
+    this.brokerCmd = brokerCmd && brokerCmd.length > 0 ? brokerCmd : null;
     this.expectedUsername = this.normalizeExpectedUsername(expectedAccount?.expectedUsername);
     this.expectedHomeAccountId = this.normalizeExpectedHomeAccountId(
       expectedAccount?.expectedHomeAccountId
@@ -422,7 +427,24 @@ class AuthManager {
     const storage =
       options.storage ??
       (await createTokenCacheStorage({ allowCommandStorage: false, logProvider: true }));
-    return new AuthManager(config, scopes, expectedAccount, storage);
+    return new AuthManager(config, scopes, expectedAccount, storage, options.brokerCmd ?? null);
+  }
+
+  private async acquireFromBroker(): Promise<string> {
+    const secrets = await getSecrets();
+    const cloudEndpoints = getCloudEndpoints(secrets.cloudType);
+    const result = await acquireTokenFromExternalBroker(this.brokerCmd as string, {
+      clientId: secrets.clientId || getDefaultClientId(secrets.cloudType),
+      tenantId: secrets.tenantId || 'common',
+      scopes: this.scopes,
+      resource: cloudEndpoints.graphApi,
+    });
+    this.accessToken = result.accessToken;
+    this.tokenExpiry = result.expiresOn ? result.expiresOn.getTime() : null;
+    logger.info(
+      `External broker acquired token${this.tokenExpiry ? `, expires at ${new Date(this.tokenExpiry).toISOString()}` : ' (no expiry reported)'}`
+    );
+    return result.accessToken;
   }
 
   async loadTokenCache(): Promise<void> {
@@ -636,6 +658,10 @@ class AuthManager {
       return this.accessToken;
     }
 
+    if (this.brokerCmd) {
+      return this.acquireFromBroker();
+    }
+
     const currentAccount = await this.getCurrentAccount();
 
     if (currentAccount) {
@@ -688,6 +714,11 @@ class AuthManager {
   }
 
   async acquireTokenByDeviceCode(hack?: (message: string) => void): Promise<string | null> {
+    if (this.brokerCmd) {
+      logger.info('External broker command configured; bypassing device code flow');
+      return this.acquireFromBroker();
+    }
+
     const deviceCodeRequest = {
       scopes: this.scopes,
       deviceCodeCallback: (response: { message: string }) => {
@@ -735,6 +766,11 @@ class AuthManager {
   }
 
   async acquireTokenInteractive(hack?: (message: string) => void): Promise<string | null> {
+    if (this.brokerCmd) {
+      logger.info('External broker command configured; bypassing interactive browser flow');
+      return this.acquireFromBroker();
+    }
+
     const open = (await import('open')).default;
 
     const interactiveRequest = {
@@ -975,6 +1011,18 @@ class AuthManager {
   async getTokenForAccount(identifier?: string): Promise<string> {
     if (this.isOAuthMode && this.oauthToken) {
       return this.oauthToken;
+    }
+
+    if (this.brokerCmd) {
+      // External broker doesn't expose MSAL accounts. The broker chooses the
+      // account (typically the OS-signed-in user via WAM). If the caller
+      // specified an identifier, it must match the cached token; otherwise we
+      // refuse to silently substitute. For the common single-account case the
+      // identifier is unused and we just return the broker token.
+      if (this.accessToken && this.tokenExpiry && this.tokenExpiry > Date.now()) {
+        return this.accessToken;
+      }
+      return this.acquireFromBroker();
     }
 
     let targetAccount: AccountInfo | null = null;

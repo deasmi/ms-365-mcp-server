@@ -60,7 +60,7 @@ async function main(): Promise<void> {
         expectedUsername: args.expectedUsername,
         expectedHomeAccountId: args.expectedHomeAccountId,
       },
-      { storage }
+      { storage, brokerCmd: args.brokerCmd ?? null }
     );
     if (useLocalAuthStorage) {
       await authManager.loadTokenCache();
