@@ -40,15 +40,47 @@ const endpoints = {
 /**
  * Creates MSAL configuration from secrets.
  * This is called during AuthManager initialization.
+ *
+ * When useBroker is true and we are on Windows, the @azure/msal-node-extensions
+ * NativeBrokerPlugin is wired into the config so MSAL routes acquire calls
+ * through the Windows Authentication Manager (WAM). WAM uses the Primary
+ * Refresh Token from the LSA, which is what carries the device-compliance
+ * claim required by Conditional Access policies on managed devices.
  */
-function createMsalConfig(secrets: AppSecrets): Configuration {
+async function createMsalConfig(
+  secrets: AppSecrets,
+  useBroker: boolean = false
+): Promise<Configuration> {
   const cloudEndpoints = getCloudEndpoints(secrets.cloudType);
-  return {
+  const config: Configuration = {
     auth: {
       clientId: secrets.clientId || getDefaultClientId(secrets.cloudType),
       authority: `${cloudEndpoints.authority}/${secrets.tenantId || 'common'}`,
     },
   };
+
+  if (useBroker) {
+    if (process.platform !== 'win32') {
+      logger.warn(
+        `--use-broker requested but the WAM broker is only supported on Windows (current platform: ${process.platform}). Falling back to the default authentication flow.`
+      );
+      return config;
+    }
+
+    try {
+      const extensions = await import('@azure/msal-node-extensions');
+      const nativeBrokerPlugin = new extensions.NativeBrokerPlugin();
+      config.broker = { nativeBrokerPlugin };
+      logger.info('WAM broker enabled via @azure/msal-node-extensions');
+    } catch (error) {
+      const message = (error as Error).message;
+      throw new Error(
+        `--use-broker was set but @azure/msal-node-extensions could not be loaded: ${message}. Install it with: npm install @azure/msal-node-extensions`
+      );
+    }
+  }
+
+  return config;
 }
 
 interface ScopeHierarchy {
@@ -367,6 +399,7 @@ interface ExpectedAccountOptions {
 
 interface AuthManagerCreateOptions {
   storage?: TokenCacheStorage;
+  useBroker?: boolean;
 }
 
 class AuthManager {
@@ -379,6 +412,7 @@ class AuthManager {
   private isOAuthMode: boolean;
   private selectedAccountId: string | null;
   private useInteractiveAuth: boolean;
+  private useBroker: boolean;
   private expectedUsername: string | null;
   private expectedHomeAccountId: string | null;
   private storage: TokenCacheStorage;
@@ -387,7 +421,8 @@ class AuthManager {
     config: Configuration,
     scopes: string[] = [],
     expectedAccount?: ExpectedAccountOptions,
-    storage?: TokenCacheStorage
+    storage?: TokenCacheStorage,
+    useBroker: boolean = false
   ) {
     logger.info(`And scopes are ${scopes.join(', ')}`, scopes);
     this.config = config;
@@ -397,6 +432,7 @@ class AuthManager {
     this.tokenExpiry = null;
     this.selectedAccountId = null;
     this.useInteractiveAuth = false;
+    this.useBroker = useBroker && process.platform === 'win32';
     this.expectedUsername = this.normalizeExpectedUsername(expectedAccount?.expectedUsername);
     this.expectedHomeAccountId = this.normalizeExpectedHomeAccountId(
       expectedAccount?.expectedHomeAccountId
@@ -418,11 +454,12 @@ class AuthManager {
     options: AuthManagerCreateOptions = {}
   ): Promise<AuthManager> {
     const secrets = await getSecrets();
-    const config = createMsalConfig(secrets);
+    const useBroker = Boolean(options.useBroker);
+    const config = await createMsalConfig(secrets, useBroker);
     const storage =
       options.storage ??
       (await createTokenCacheStorage({ allowCommandStorage: false, logProvider: true }));
-    return new AuthManager(config, scopes, expectedAccount, storage);
+    return new AuthManager(config, scopes, expectedAccount, storage, useBroker);
   }
 
   async loadTokenCache(): Promise<void> {
@@ -688,6 +725,13 @@ class AuthManager {
   }
 
   async acquireTokenByDeviceCode(hack?: (message: string) => void): Promise<string | null> {
+    if (this.useBroker) {
+      logger.info(
+        'WAM broker enabled; routing device code request through brokered interactive flow'
+      );
+      return this.acquireTokenInteractive(hack);
+    }
+
     const deviceCodeRequest = {
       scopes: this.scopes,
       deviceCodeCallback: (response: { message: string }) => {
@@ -737,7 +781,7 @@ class AuthManager {
   async acquireTokenInteractive(hack?: (message: string) => void): Promise<string | null> {
     const open = (await import('open')).default;
 
-    const interactiveRequest = {
+    const interactiveRequest: Parameters<PublicClientApplication['acquireTokenInteractive']>[0] = {
       scopes: this.scopes,
       openBrowser: async (url: string) => {
         const message = 'Opening browser for Microsoft sign-in...';
@@ -751,6 +795,13 @@ class AuthManager {
         '<h1>Authentication successful!</h1><p>You can close this window and return to your application.</p>',
       errorTemplate: '<h1>Authentication failed</h1><p>Something went wrong. Please try again.</p>',
     };
+
+    if (this.useBroker) {
+      // WAM requires a parent window handle. For a console / MCP server with no
+      // owning window we pass a zero handle, which is the documented pattern for
+      // headless callers — the broker then attaches its UI to the foreground.
+      (interactiveRequest as { windowHandle?: Buffer }).windowHandle = Buffer.alloc(4);
+    }
 
     try {
       logger.info('Requesting interactive browser login...');

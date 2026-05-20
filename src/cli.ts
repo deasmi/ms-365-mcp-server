@@ -75,6 +75,10 @@ program
     'Use browser-based interactive OAuth flow instead of device code for stdio mode. Opens system browser with localhost callback for seamless sign-in.'
   )
   .option(
+    '--use-broker',
+    'Use the Windows Authentication Manager (WAM) broker for sign-in. Required on Azure AD-joined / Intune-managed Windows devices with Conditional Access policies that require a compliant device. Windows only; logs a warning and falls back to the default flow on other platforms.'
+  )
+  .option(
     '--public-url <url>',
     'Public base URL (e.g. https://mcp.example.com) used in browser-facing OAuth redirects when running behind a reverse proxy. Server-to-server endpoints (token, register) stay on the request host.'
   )
@@ -116,6 +120,7 @@ export interface CommandOptions {
   enableDynamicRegistration?: boolean;
   dynamicRegistration?: boolean;
   authBrowser?: boolean;
+  useBroker?: boolean;
   obo?: boolean;
   publicUrl?: string;
   /** @deprecated use publicUrl */

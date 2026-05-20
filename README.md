@@ -350,6 +350,22 @@ For interactive authentication via device code:
 
 Tokens are cached securely in your OS credential store (fallback to file).
 
+##### Managed Windows devices (Conditional Access) — `--use-broker`
+
+Organisations that enforce Azure AD Conditional Access policies requiring a compliant / managed device will see device code sign-in fail with:
+
+> "Your sign-in was successful but your admin requires the device requesting access to be managed by [Org]..."
+
+Pass `--use-broker` to route sign-in through the Windows Authentication Manager (WAM), which uses the device's Primary Refresh Token from the LSA and carries the device-compliance claim that Conditional Access requires:
+
+```bash
+ms-365-mcp-server --use-broker --login
+```
+
+- Windows only. On Linux/macOS the flag is a no-op and falls back to the default flow with a warning.
+- Requires the optional [`@azure/msal-node-extensions`](https://www.npmjs.com/package/@azure/msal-node-extensions) package, which npm installs automatically on Windows from `optionalDependencies`.
+- Token cache continues to use the existing keytar / file storage layer — no additional setup needed.
+
 #### 2. OAuth Authorization Code Flow (HTTP mode only)
 
 When running with `--http`, the server **requires** OAuth authentication:
